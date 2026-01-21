@@ -39,7 +39,7 @@ export class GeminiVideoClient {
     }
 
     this.client = new GoogleGenAI({ apiKey });
-    this.model = process.env.GEMINI_MODEL || "gemini-2.5-flash";
+    this.model = process.env.GEMINI_MODEL || "gemini-3-flash-preview";
   }
 
   async summarize(youtubeUrl: string, detailLevel: DetailLevel): Promise<string> {
@@ -53,6 +53,15 @@ export class GeminiVideoClient {
   }
 
   private async analyze(youtubeUrl: string, prompt: string): Promise<string> {
+    const currentDate = new Date().toLocaleDateString("en-US", {
+      weekday: "long",
+      year: "numeric",
+      month: "long",
+      day: "numeric",
+    });
+
+    const fullPrompt = `[System Context: Today's date is ${currentDate}]\n\n${prompt}`;
+
     try {
       const response = await this.client.models.generateContent({
         model: this.model,
@@ -66,7 +75,7 @@ export class GeminiVideoClient {
                 },
               },
               {
-                text: prompt,
+                text: fullPrompt,
               },
             ],
           },
