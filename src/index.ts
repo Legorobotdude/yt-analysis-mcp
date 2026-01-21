@@ -10,8 +10,14 @@ import { TOOLS } from "./tools.js";
 import { GeminiVideoClient, VideoAnalysisError } from "./gemini-client.js";
 import { YouTubeMetadataClient } from "./youtube-metadata.js";
 import {
+  ScreenshotExtractor,
+  DependencyError,
+  ScreenshotExtractionError,
+} from "./screenshot-extractor.js";
+import {
   SummarizeInputSchema,
   AskInputSchema,
+  ExtractScreenshotsInputSchema,
   type DetailLevel,
 } from "./validators.js";
 
@@ -29,6 +35,7 @@ const server = new Server(
 
 let geminiClient: GeminiVideoClient;
 let youtubeClient: YouTubeMetadataClient | null = null;
+const screenshotExtractor = new ScreenshotExtractor();
 
 try {
   geminiClient = new GeminiVideoClient();
@@ -109,6 +116,61 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         };
       }
 
+      case "extract_screenshots": {
+        const input = ExtractScreenshotsInputSchema.parse(args);
+
+        // Step 1: Get timestamps from Gemini
+        const timestampResult = await geminiClient.extractTimestamps(
+          input.youtube_url,
+          input.count,
+          input.focus
+        );
+
+        // Step 2: Extract screenshots at those timestamps
+        const screenshots = await screenshotExtractor.extractScreenshots(
+          input.youtube_url,
+          timestampResult.timestamps,
+          {
+            outputDir: input.output_dir,
+          }
+        );
+
+        // Step 3: Build MCP response with images
+        const content: Array<
+          | { type: "text"; text: string }
+          | { type: "image"; data: string; mimeType: string }
+        > = [];
+
+        // Format duration
+        const durationMin = Math.floor(timestampResult.video_duration_seconds / 60);
+        const durationSec = timestampResult.video_duration_seconds % 60;
+        const durationStr = `${durationMin}:${String(Math.floor(durationSec)).padStart(2, "0")}`;
+
+        // Add summary text
+        const summaryLines = screenshots.map(
+          (s, i) =>
+            `${i + 1}. [${s.timestamp_formatted}] ${s.description}${s.filePath ? `\n   Saved to: ${s.filePath}` : ""}`
+        );
+
+        content.push({
+          type: "text",
+          text:
+            `Extracted ${screenshots.length} screenshots from video (duration: ${durationStr})\n\n` +
+            summaryLines.join("\n"),
+        });
+
+        // Add images
+        for (const screenshot of screenshots) {
+          content.push({
+            type: "image",
+            data: screenshot.base64,
+            mimeType: screenshot.mimeType,
+          });
+        }
+
+        return { content };
+      }
+
       default:
         throw new Error(`Unknown tool: ${name}`);
     }
@@ -117,15 +179,24 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
     const isValidationError =
       error instanceof Error && error.name === "ZodError";
 
+    let errorText: string;
+    if (isValidationError) {
+      errorText = `Validation error: ${message}`;
+    } else if (error instanceof DependencyError) {
+      errorText = `Dependency error: ${message}`;
+    } else if (error instanceof ScreenshotExtractionError) {
+      errorText = `Screenshot extraction failed: ${message}`;
+    } else if (error instanceof VideoAnalysisError) {
+      errorText = message;
+    } else {
+      errorText = `Error: ${message}`;
+    }
+
     return {
       content: [
         {
           type: "text",
-          text: isValidationError
-            ? `Validation error: ${message}`
-            : error instanceof VideoAnalysisError
-              ? message
-              : `Error: ${message}`,
+          text: errorText,
         },
       ],
       isError: true,

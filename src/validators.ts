@@ -25,8 +25,16 @@ export const AskInputSchema = z.object({
   question: z.string().min(1, "Question cannot be empty"),
 });
 
+export const ExtractScreenshotsInputSchema = z.object({
+  youtube_url: YouTubeUrlSchema,
+  count: z.number().int().min(1).max(20).default(5),
+  output_dir: z.string().optional(),
+  focus: z.string().optional(),
+});
+
 export type SummarizeInput = z.infer<typeof SummarizeInputSchema>;
 export type AskInput = z.infer<typeof AskInputSchema>;
+export type ExtractScreenshotsInput = z.infer<typeof ExtractScreenshotsInputSchema>;
 export type DetailLevel = z.infer<typeof DetailLevelSchema>;
 
 export function validateYouTubeUrl(url: string): string {
