@@ -4,9 +4,18 @@ import { exec as execCallback } from "child_process";
 import * as fs from "fs/promises";
 import * as path from "path";
 import * as os from "os";
-import { extractVideoId } from "./validators.js";
+import { extractVideoId, type Resolution } from "./validators.js";
 
 const exec = promisify(execCallback);
+
+// Resolution to height mapping
+const RESOLUTION_MAP: Record<Resolution, number | null> = {
+  thumbnail: 160,
+  small: 360,
+  medium: 720,
+  large: 1080,
+  full: null, // No scaling, use original
+};
 
 export class DependencyError extends Error {
   constructor(dependency: string, installHint: string) {
@@ -37,6 +46,7 @@ export interface Screenshot {
 export interface ExtractOptions {
   outputDir?: string;
   quality?: number;
+  resolution?: Resolution;
 }
 
 export class ScreenshotExtractor {
@@ -71,15 +81,19 @@ export class ScreenshotExtractor {
     youtubeUrl: string,
     timestampSeconds: number,
     outputPath: string,
-    quality: number = 85
+    quality: number = 85,
+    resolution: Resolution = "large"
   ): Promise<void> {
     if (!this.ytdlpPath || !this.ffmpegPath) {
       await this.checkDependencies();
     }
 
-    // Get direct video stream URL from yt-dlp (best quality under 1080p)
+    // Get target height for yt-dlp format selection
+    const targetHeight = RESOLUTION_MAP[resolution] ?? 1080;
+
+    // Get direct video stream URL from yt-dlp
     const { stdout: streamUrl } = await exec(
-      `${this.ytdlpPath} -f "bestvideo[height<=1080]/best[height<=1080]" -g "${youtubeUrl}" 2>/dev/null | head -1`
+      `${this.ytdlpPath} -f "bestvideo[height<=${targetHeight}]/best[height<=${targetHeight}]" -g "${youtubeUrl}" 2>/dev/null | head -1`
     );
 
     const videoStreamUrl = streamUrl.trim();
@@ -104,9 +118,15 @@ export class ScreenshotExtractor {
       "1",
       "-q:v",
       String(ffmpegQuality),
-      "-y",
-      outputPath,
     ];
+
+    // Add scaling filter if resolution requires it
+    const scaleHeight = RESOLUTION_MAP[resolution];
+    if (scaleHeight !== null) {
+      ffmpegCmd.push("-vf", `scale=-1:${scaleHeight}`);
+    }
+
+    ffmpegCmd.push("-y", outputPath);
 
     await new Promise<void>((resolve, reject) => {
       const proc = spawn(ffmpegCmd[0], ffmpegCmd.slice(1), {
@@ -155,6 +175,7 @@ export class ScreenshotExtractor {
 
     const videoId = extractVideoId(youtubeUrl);
     const quality = options.quality ?? 85;
+    const resolution = options.resolution ?? "large";
 
     // Determine output directory
     const userOutputDir = options.outputDir || process.env.SCREENSHOT_OUTPUT_DIR;
@@ -172,7 +193,7 @@ export class ScreenshotExtractor {
       const filePath = path.join(outputDir, filename);
 
       try {
-        await this.extractFrame(youtubeUrl, ts.time_seconds, filePath, quality);
+        await this.extractFrame(youtubeUrl, ts.time_seconds, filePath, quality, resolution);
 
         // Read file and convert to base64
         const buffer = await fs.readFile(filePath);
@@ -210,5 +231,28 @@ export class ScreenshotExtractor {
     }
 
     return screenshots;
+  }
+
+  /**
+   * Extract frames at specific timestamps (manual mode).
+   * Simpler input format that just takes an array of seconds.
+   */
+  async extractFramesAtTimestamps(
+    youtubeUrl: string,
+    timestampSeconds: number[],
+    options: ExtractOptions = {}
+  ): Promise<Screenshot[]> {
+    // Convert simple timestamps to the full format
+    const timestamps = timestampSeconds.map((seconds) => {
+      const mins = Math.floor(seconds / 60);
+      const secs = Math.floor(seconds % 60);
+      return {
+        time_seconds: seconds,
+        time_formatted: `${mins}:${String(secs).padStart(2, "0")}`,
+        description: `Frame at ${mins}:${String(secs).padStart(2, "0")}`,
+      };
+    });
+
+    return this.extractScreenshots(youtubeUrl, timestamps, options);
   }
 }

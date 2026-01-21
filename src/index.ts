@@ -18,6 +18,8 @@ import {
   SummarizeInputSchema,
   AskInputSchema,
   ExtractScreenshotsInputSchema,
+  GetVideoTimestampsInputSchema,
+  ExtractFramesInputSchema,
   type DetailLevel,
 } from "./validators.js";
 
@@ -132,6 +134,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           timestampResult.timestamps,
           {
             outputDir: input.output_dir,
+            resolution: input.resolution,
           }
         );
 
@@ -155,7 +158,82 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         content.push({
           type: "text",
           text:
-            `Extracted ${screenshots.length} screenshots from video (duration: ${durationStr})\n\n` +
+            `Extracted ${screenshots.length} screenshots from video (duration: ${durationStr}, resolution: ${input.resolution})\n\n` +
+            summaryLines.join("\n"),
+        });
+
+        // Add images
+        for (const screenshot of screenshots) {
+          content.push({
+            type: "image",
+            data: screenshot.base64,
+            mimeType: screenshot.mimeType,
+          });
+        }
+
+        return { content };
+      }
+
+      case "get_video_timestamps": {
+        const input = GetVideoTimestampsInputSchema.parse(args);
+
+        // Get timestamps from Gemini without extracting frames
+        const timestampResult = await geminiClient.extractTimestamps(
+          input.youtube_url,
+          input.count,
+          input.focus
+        );
+
+        // Format duration
+        const durationMin = Math.floor(timestampResult.video_duration_seconds / 60);
+        const durationSec = timestampResult.video_duration_seconds % 60;
+        const durationStr = `${durationMin}:${String(Math.floor(durationSec)).padStart(2, "0")}`;
+
+        // Build response text
+        const lines = timestampResult.timestamps.map(
+          (ts, i) => `${i + 1}. [${ts.time_formatted}] (${ts.time_seconds}s) - ${ts.description}`
+        );
+
+        const response =
+          `Video duration: ${durationStr}\n\n` +
+          `Identified ${timestampResult.timestamps.length} key timestamps:\n\n` +
+          lines.join("\n") +
+          `\n\nUse extract_frames with these timestamps to extract the frames.`;
+
+        return {
+          content: [{ type: "text", text: response }],
+        };
+      }
+
+      case "extract_frames": {
+        const input = ExtractFramesInputSchema.parse(args);
+
+        // Extract frames at the specified timestamps
+        const screenshots = await screenshotExtractor.extractFramesAtTimestamps(
+          input.youtube_url,
+          input.timestamps,
+          {
+            outputDir: input.output_dir,
+            resolution: input.resolution,
+          }
+        );
+
+        // Build MCP response with images
+        const content: Array<
+          | { type: "text"; text: string }
+          | { type: "image"; data: string; mimeType: string }
+        > = [];
+
+        // Add summary text
+        const summaryLines = screenshots.map(
+          (s, i) =>
+            `${i + 1}. [${s.timestamp_formatted}]${s.filePath ? ` - Saved to: ${s.filePath}` : ""}`
+        );
+
+        content.push({
+          type: "text",
+          text:
+            `Extracted ${screenshots.length} frames (resolution: ${input.resolution})\n\n` +
             summaryLines.join("\n"),
         });
 

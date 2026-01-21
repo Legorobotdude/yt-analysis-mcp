@@ -156,6 +156,54 @@ describe.skipIf(!hasApiKey || !dependenciesAvailable)(
       expect(highQuality[0].base64.length).toBeGreaterThan(0);
       expect(lowQuality[0].base64.length).toBeGreaterThan(0);
     }, 180000);
+
+    it("handles resolution parameter", async () => {
+      const timestamps = [
+        { time_seconds: 5, time_formatted: "0:05", description: "Resolution test" },
+      ];
+
+      const thumbnail = await extractor.extractScreenshots(
+        TEST_VIDEO_URL,
+        timestamps,
+        { resolution: "thumbnail" }
+      );
+
+      const large = await extractor.extractScreenshots(
+        TEST_VIDEO_URL,
+        timestamps,
+        { resolution: "large" }
+      );
+
+      // Larger resolution should produce larger base64
+      console.log(
+        `Thumbnail (160p): ${thumbnail[0].base64.length} chars`
+      );
+      console.log(
+        `Large (1080p): ${large[0].base64.length} chars`
+      );
+
+      expect(thumbnail[0].base64.length).toBeGreaterThan(0);
+      expect(large[0].base64.length).toBeGreaterThan(thumbnail[0].base64.length);
+    }, 180000);
+
+    it("extracts frames at manual timestamps", async () => {
+      const timestampSeconds = [3, 8, 15];
+
+      const screenshots = await extractor.extractFramesAtTimestamps(
+        TEST_VIDEO_URL,
+        timestampSeconds
+      );
+
+      expect(screenshots).toHaveLength(3);
+
+      for (let i = 0; i < screenshots.length; i++) {
+        expect(screenshots[i].timestamp_seconds).toBe(timestampSeconds[i]);
+        expect(screenshots[i].base64.length).toBeGreaterThan(100);
+        console.log(
+          `Manual frame at ${screenshots[i].timestamp_formatted}: ${screenshots[i].base64.length} base64 chars`
+        );
+      }
+    }, 240000);
   }
 );
 

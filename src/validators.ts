@@ -15,6 +15,10 @@ export const DetailLevelSchema = z
   .enum(["brief", "medium", "detailed"])
   .default("medium");
 
+export const ResolutionSchema = z
+  .enum(["thumbnail", "small", "medium", "large", "full"])
+  .default("large");
+
 export const SummarizeInputSchema = z.object({
   youtube_url: YouTubeUrlSchema,
   detail_level: DetailLevelSchema,
@@ -30,12 +34,29 @@ export const ExtractScreenshotsInputSchema = z.object({
   count: z.number().int().min(1).max(20).default(5),
   output_dir: z.string().optional(),
   focus: z.string().optional(),
+  resolution: ResolutionSchema,
+});
+
+export const GetVideoTimestampsInputSchema = z.object({
+  youtube_url: YouTubeUrlSchema,
+  count: z.number().int().min(1).max(20).default(5),
+  focus: z.string().optional(),
+});
+
+export const ExtractFramesInputSchema = z.object({
+  youtube_url: YouTubeUrlSchema,
+  timestamps: z.array(z.number().min(0)).min(1).max(20),
+  output_dir: z.string().optional(),
+  resolution: ResolutionSchema,
 });
 
 export type SummarizeInput = z.infer<typeof SummarizeInputSchema>;
 export type AskInput = z.infer<typeof AskInputSchema>;
 export type ExtractScreenshotsInput = z.infer<typeof ExtractScreenshotsInputSchema>;
+export type GetVideoTimestampsInput = z.infer<typeof GetVideoTimestampsInputSchema>;
+export type ExtractFramesInput = z.infer<typeof ExtractFramesInputSchema>;
 export type DetailLevel = z.infer<typeof DetailLevelSchema>;
+export type Resolution = z.infer<typeof ResolutionSchema>;
 
 export function validateYouTubeUrl(url: string): string {
   return YouTubeUrlSchema.parse(url);
