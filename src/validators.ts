@@ -19,6 +19,14 @@ export const ResolutionSchema = z
   .enum(["thumbnail", "small", "medium", "large", "full"])
   .default("large");
 
+export const TranscriptFormatSchema = z
+  .enum(["text", "json", "srt", "vtt"])
+  .default("text");
+
+export const SearchTypeSchema = z
+  .enum(["visual", "audio", "both"])
+  .default("both");
+
 export const SummarizeInputSchema = z.object({
   youtube_url: YouTubeUrlSchema,
   detail_level: DetailLevelSchema,
@@ -50,13 +58,36 @@ export const ExtractFramesInputSchema = z.object({
   resolution: ResolutionSchema,
 });
 
+export const GetTranscriptInputSchema = z.object({
+  youtube_url: YouTubeUrlSchema,
+  include_timestamps: z.boolean().default(true),
+  format: TranscriptFormatSchema,
+  language: z.string().default("en"),
+});
+
+export const SearchInVideoInputSchema = z.object({
+  youtube_url: YouTubeUrlSchema,
+  query: z.string().min(1, "Query cannot be empty"),
+  search_type: SearchTypeSchema,
+});
+
+export const SearchYouTubeInputSchema = z.object({
+  query: z.string().min(1, "Query cannot be empty"),
+  max_results: z.number().int().min(1).max(25).default(5),
+});
+
 export type SummarizeInput = z.infer<typeof SummarizeInputSchema>;
 export type AskInput = z.infer<typeof AskInputSchema>;
 export type ExtractScreenshotsInput = z.infer<typeof ExtractScreenshotsInputSchema>;
 export type GetVideoTimestampsInput = z.infer<typeof GetVideoTimestampsInputSchema>;
 export type ExtractFramesInput = z.infer<typeof ExtractFramesInputSchema>;
+export type GetTranscriptInput = z.infer<typeof GetTranscriptInputSchema>;
+export type SearchInVideoInput = z.infer<typeof SearchInVideoInputSchema>;
+export type SearchYouTubeInput = z.infer<typeof SearchYouTubeInputSchema>;
 export type DetailLevel = z.infer<typeof DetailLevelSchema>;
 export type Resolution = z.infer<typeof ResolutionSchema>;
+export type TranscriptFormat = z.infer<typeof TranscriptFormatSchema>;
+export type SearchType = z.infer<typeof SearchTypeSchema>;
 
 export function validateYouTubeUrl(url: string): string {
   return YouTubeUrlSchema.parse(url);

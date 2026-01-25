@@ -9,6 +9,16 @@ export interface VideoMetadata {
   thumbnailUrl: string;
 }
 
+export interface SearchResult {
+  videoId: string;
+  url: string;
+  title: string;
+  description: string;
+  channelTitle: string;
+  publishedAt: string;
+  thumbnailUrl: string;
+}
+
 export class YouTubeMetadataClient {
   private youtube;
 
@@ -48,6 +58,40 @@ export class YouTubeMetadataClient {
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       throw new Error(`Failed to fetch YouTube metadata: ${message}`);
+    }
+  }
+
+  async search(query: string, maxResults: number = 5): Promise<SearchResult[]> {
+    try {
+      const response = await this.youtube.search.list({
+        part: ["snippet"],
+        q: query,
+        type: ["video"],
+        maxResults: maxResults,
+      });
+
+      const items = response.data.items || [];
+
+      return items.map((item) => {
+        const snippet = item.snippet;
+        const videoId = item.id?.videoId || "";
+
+        return {
+          videoId,
+          url: `https://youtube.com/watch?v=${videoId}`,
+          title: snippet?.title || "Unknown",
+          description: snippet?.description || "",
+          channelTitle: snippet?.channelTitle || "Unknown",
+          publishedAt: snippet?.publishedAt || "",
+          thumbnailUrl:
+            snippet?.thumbnails?.high?.url ||
+            snippet?.thumbnails?.default?.url ||
+            "",
+        };
+      });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      throw new Error(`Failed to search YouTube: ${message}`);
     }
   }
 }

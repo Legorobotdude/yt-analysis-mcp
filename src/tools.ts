@@ -47,7 +47,7 @@ export const TOOLS: Tool[] = [
   {
     name: "extract_screenshots",
     description:
-      "Extract key screenshots from a YouTube video at important moments. Uses AI to identify visually significant timestamps, then extracts frames. Returns both base64 images and optionally saves to disk.",
+      "RECOMMENDED: Extract key screenshots from a YouTube video. Uses AI to automatically identify the most visually significant moments and extracts frames at those timestamps. This is the default tool for getting screenshots - use this unless you have a specific reason to manually specify timestamps.",
     inputSchema: {
       type: "object",
       properties: {
@@ -87,7 +87,7 @@ export const TOOLS: Tool[] = [
   {
     name: "get_video_timestamps",
     description:
-      "Preview mode: Use AI to identify important moments in a YouTube video and return their timestamps WITHOUT extracting frames. Use this to preview what timestamps would be selected before committing to extraction.",
+      "RARELY NEEDED: Preview AI-selected timestamps without extracting frames. Only use this if you need to see what timestamps would be selected before extraction, or if you want to manually filter/modify the timestamps before passing them to extract_frames. In most cases, just use extract_screenshots directly.",
     inputSchema: {
       type: "object",
       properties: {
@@ -115,7 +115,7 @@ export const TOOLS: Tool[] = [
   {
     name: "extract_frames",
     description:
-      "Extract frames from a YouTube video at specific timestamps you provide. Use this when you already know the exact timestamps you want (e.g., from get_video_timestamps or video summary).",
+      "ADVANCED: Extract frames at specific timestamps YOU provide. DO NOT USE THIS unless you already have exact timestamps from another source (e.g., user specified '2:30 and 5:15', or you got timestamps from get_video_timestamps/search_in_video). For general screenshot extraction, use extract_screenshots instead - it uses AI to pick the best moments automatically.",
     inputSchema: {
       type: "object",
       properties: {
@@ -148,6 +148,90 @@ export const TOOLS: Tool[] = [
         },
       },
       required: ["youtube_url", "timestamps"],
+    },
+  },
+  {
+    name: "get_transcript",
+    description:
+      "Get the full transcript of a YouTube video with timestamps. Tries native captions first (faster, more accurate), falls back to AI transcription if unavailable.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        youtube_url: {
+          type: "string",
+          description:
+            "Full YouTube URL (youtube.com/watch?v=ID, youtu.be/ID, or youtube.com/shorts/ID)",
+        },
+        include_timestamps: {
+          type: "boolean",
+          default: true,
+          description: "Whether to include timestamps in the output (default: true)",
+        },
+        format: {
+          type: "string",
+          enum: ["text", "json", "srt", "vtt"],
+          default: "text",
+          description:
+            "Output format: text (readable), json (structured), srt (SubRip subtitles), vtt (WebVTT subtitles). Default: text",
+        },
+        language: {
+          type: "string",
+          default: "en",
+          description:
+            "Preferred language code for captions (e.g., 'en', 'es', 'fr'). Default: 'en'",
+        },
+      },
+      required: ["youtube_url"],
+    },
+  },
+  {
+    name: "search_in_video",
+    description:
+      "Search for specific content, topics, or mentions within a YouTube video. Returns timestamps where the content appears.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        youtube_url: {
+          type: "string",
+          description:
+            "Full YouTube URL (youtube.com/watch?v=ID, youtu.be/ID, or youtube.com/shorts/ID)",
+        },
+        query: {
+          type: "string",
+          description:
+            "What to search for (topic, phrase, visual element, person, etc.)",
+        },
+        search_type: {
+          type: "string",
+          enum: ["visual", "audio", "both"],
+          default: "both",
+          description:
+            "Where to search: visual (on-screen elements), audio (spoken content), both (default)",
+        },
+      },
+      required: ["youtube_url", "query"],
+    },
+  },
+  {
+    name: "search_youtube",
+    description:
+      "Search YouTube for videos matching a query. Returns video titles, descriptions, channels, and URLs. Use this to find videos before analyzing them with other tools.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        query: {
+          type: "string",
+          description: "Search terms to find YouTube videos",
+        },
+        max_results: {
+          type: "number",
+          minimum: 1,
+          maximum: 25,
+          default: 5,
+          description: "Maximum number of results to return (1-25, default: 5)",
+        },
+      },
+      required: ["query"],
     },
   },
 ];

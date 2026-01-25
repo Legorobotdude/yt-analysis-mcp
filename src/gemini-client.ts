@@ -1,5 +1,5 @@
 import { GoogleGenAI } from "@google/genai";
-import type { DetailLevel } from "./validators.js";
+import type { DetailLevel, SearchType } from "./validators.js";
 
 export class VideoAnalysisError extends Error {
   constructor(message: string) {
@@ -35,30 +35,57 @@ export interface TimestampResult {
   video_duration_seconds: number;
 }
 
-const TIMESTAMP_EXTRACTION_PROMPT = `Analyze this video and identify the most visually important moments that would make good screenshots.
+export interface SearchMatch {
+  timestamp_seconds: number;
+  timestamp_formatted: string;
+  context: string;
+  match_type: "visual" | "audio" | "both";
+}
 
-Return EXACTLY a JSON object with this structure (no markdown, no code blocks, just raw JSON):
+export interface SearchResult {
+  matches: SearchMatch[];
+  query: string;
+  total_matches: number;
+}
+
+const TIMESTAMP_EXTRACTION_PROMPT = `Analyze this video and select {count} timestamps that will produce HIGH-QUALITY screenshots.
+
+CRITICAL: Frame quality is the TOP priority. A boring but sharp frame is better than an interesting but blurry one.
+
+STEP 1 - REJECT these frame types (they make bad screenshots):
+- Motion blur (camera or subject moving)
+- Scene transitions, fades, or dissolves
+- Dark or poorly lit moments
+- Out-of-focus shots
+- Frames with heavy compression artifacts
+- Moments where the subject is partially out of frame
+- Rapid camera movement or shaky footage
+
+STEP 2 - PREFER these frame types:
+- Static shots where camera and subject are still
+- Well-lit scenes with good contrast
+- Sharp focus on the main subject
+- Stable, composed frames (not mid-pan or mid-zoom)
+- Moments 0.5-1 second AFTER a scene change (not during)
+- Clear text/graphics when present (fully rendered, not animating)
+
+STEP 3 - Among quality frames, prioritize:
+- Visual variety (different scenes, angles, subjects)
+- Key content moments (demonstrations, reveals, important visuals)
+- Spread across the video timeline
+{focus_instruction}
+
+Return EXACTLY a JSON object (no markdown, no code blocks):
 {
   "timestamps": [
     {
       "time_seconds": <number>,
       "time_formatted": "<MM:SS or HH:MM:SS>",
-      "description": "<brief description of what makes this moment visually significant>"
+      "description": "<what's shown AND why this frame is high quality>"
     }
   ],
   "video_duration_seconds": <number>
-}
-
-Selection criteria for timestamps:
-- Scene changes or transitions
-- Key visual demonstrations or examples
-- Important diagrams, charts, or text on screen
-- Product reveals or feature demonstrations
-- Moments with clear, non-blurry frames
-- Diverse coverage across the video timeline (not clustered)
-
-Return exactly {count} timestamps, evenly distributed when possible.
-{focus_instruction}`;
+}`;
 
 export class GeminiVideoClient {
   private client: GoogleGenAI;
@@ -126,6 +153,100 @@ export class GeminiVideoClient {
     } catch (error) {
       throw new VideoAnalysisError(
         `Failed to parse timestamp response: ${error instanceof Error ? error.message : error}\n\nRaw response: ${response}`
+      );
+    }
+  }
+
+  /**
+   * Extract full transcript from video using AI transcription.
+   * Used as fallback when native captions are not available.
+   */
+  async extractTranscript(youtubeUrl: string): Promise<string> {
+    const prompt = `Extract the complete transcript of this video with timestamps.
+
+Return the transcript in this exact JSON format (no markdown, just raw JSON):
+{
+  "segments": [
+    {
+      "start_ms": <number - start time in milliseconds>,
+      "duration_ms": <number - approximate duration in milliseconds>,
+      "text": "<spoken text for this segment>"
+    }
+  ],
+  "video_duration_seconds": <number - total video duration>,
+  "language": "<detected language code, e.g., 'en'>"
+}
+
+Guidelines:
+- Transcribe ALL spoken content accurately
+- Break into natural segments (sentences or phrases)
+- Include speaker changes if multiple speakers
+- Use [brackets] for important non-speech sounds only if relevant
+- Be thorough - capture every word spoken in the video`;
+
+    return this.analyze(youtubeUrl, prompt);
+  }
+
+  /**
+   * Search for specific content within a video.
+   * Returns timestamps where the content appears.
+   */
+  async searchInVideo(
+    youtubeUrl: string,
+    query: string,
+    searchType: SearchType
+  ): Promise<SearchResult> {
+    const searchContext =
+      searchType === "visual"
+        ? "visual elements only (what you see on screen)"
+        : searchType === "audio"
+          ? "audio/speech only (what is spoken or heard)"
+          : "both visual elements and audio/speech";
+
+    const prompt = `Search this video for: "${query}"
+
+Search in: ${searchContext}
+
+Return results in this exact JSON format (no markdown, just raw JSON):
+{
+  "matches": [
+    {
+      "timestamp_seconds": <number>,
+      "timestamp_formatted": "<MM:SS or HH:MM:SS>",
+      "context": "<brief description of how/where the query appears>",
+      "match_type": "<'visual' or 'audio' or 'both'>"
+    }
+  ],
+  "query": "${query}",
+  "total_matches": <number>
+}
+
+Guidelines:
+- Find ALL occurrences of the query or closely related content
+- For visual matches: describe what appears on screen
+- For audio matches: include relevant quote or paraphrase
+- Be thorough but avoid false positives
+- If nothing matches, return empty matches array with total_matches: 0`;
+
+    const response = await this.analyze(youtubeUrl, prompt);
+
+    // Parse JSON from response
+    let jsonStr = response.trim();
+    if (jsonStr.startsWith("```")) {
+      jsonStr = jsonStr.replace(/^```(?:json)?\n?/, "").replace(/\n?```$/, "");
+    }
+
+    try {
+      const result = JSON.parse(jsonStr) as SearchResult;
+
+      if (!Array.isArray(result.matches)) {
+        throw new Error("Invalid response: matches must be an array");
+      }
+
+      return result;
+    } catch (error) {
+      throw new VideoAnalysisError(
+        `Failed to parse search response: ${error instanceof Error ? error.message : error}\n\nRaw response: ${response}`
       );
     }
   }

@@ -5,6 +5,7 @@ import {
   YouTubeUrlSchema,
   SummarizeInputSchema,
   AskInputSchema,
+  SearchYouTubeInputSchema,
 } from "../src/validators.js";
 
 describe("YouTubeUrlSchema", () => {
@@ -174,5 +175,56 @@ describe("AskInputSchema", () => {
       question: "What is this about?",
     };
     expect(() => AskInputSchema.parse(input)).toThrow();
+  });
+});
+
+describe("SearchYouTubeInputSchema", () => {
+  it("accepts valid input with query only", () => {
+    const input = { query: "typescript tutorial" };
+    const result = SearchYouTubeInputSchema.parse(input);
+    expect(result.query).toBe("typescript tutorial");
+    expect(result.max_results).toBe(5);
+  });
+
+  it("accepts valid input with max_results", () => {
+    const input = { query: "coding", max_results: 10 };
+    const result = SearchYouTubeInputSchema.parse(input);
+    expect(result.query).toBe("coding");
+    expect(result.max_results).toBe(10);
+  });
+
+  it("rejects empty query", () => {
+    const input = { query: "" };
+    expect(() => SearchYouTubeInputSchema.parse(input)).toThrow(
+      "Query cannot be empty"
+    );
+  });
+
+  it("rejects missing query", () => {
+    const input = { max_results: 5 };
+    expect(() => SearchYouTubeInputSchema.parse(input)).toThrow();
+  });
+
+  it("rejects max_results below 1", () => {
+    const input = { query: "test", max_results: 0 };
+    expect(() => SearchYouTubeInputSchema.parse(input)).toThrow();
+  });
+
+  it("rejects max_results above 25", () => {
+    const input = { query: "test", max_results: 50 };
+    expect(() => SearchYouTubeInputSchema.parse(input)).toThrow();
+  });
+
+  it("rejects non-integer max_results", () => {
+    const input = { query: "test", max_results: 5.5 };
+    expect(() => SearchYouTubeInputSchema.parse(input)).toThrow();
+  });
+
+  it("accepts max_results at boundaries", () => {
+    const min = SearchYouTubeInputSchema.parse({ query: "test", max_results: 1 });
+    expect(min.max_results).toBe(1);
+
+    const max = SearchYouTubeInputSchema.parse({ query: "test", max_results: 25 });
+    expect(max.max_results).toBe(25);
   });
 });

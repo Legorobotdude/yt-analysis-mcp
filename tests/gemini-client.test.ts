@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeAll } from "vitest";
-import { GeminiVideoClient, VideoAnalysisError } from "../src/gemini-client.js";
+import { GeminiVideoClient, VideoAnalysisError, type SearchResult } from "../src/gemini-client.js";
 
 // Known public test video - "Me at the zoo" (first YouTube video, always available)
 const TEST_VIDEO_URL = "https://www.youtube.com/watch?v=jNQXAC9IVRw";
@@ -58,6 +58,71 @@ describe.skipIf(!hasApiKey)("GeminiVideoClient - Integration Tests", () => {
     expect(result.length).toBeGreaterThan(0);
     console.log(`Location answer:\n${result}`);
   }, 60000);
+
+  it("searches for visual content in video", async () => {
+    const result = await client.searchInVideo(TEST_VIDEO_URL, "elephants", "visual");
+
+    console.log(`Search result (visual):\n${JSON.stringify(result, null, 2)}`);
+
+    expect(result).toHaveProperty("matches");
+    expect(result).toHaveProperty("query");
+    expect(result).toHaveProperty("total_matches");
+    expect(Array.isArray(result.matches)).toBe(true);
+
+    // "Me at the zoo" shows elephants
+    expect(result.total_matches).toBeGreaterThan(0);
+  }, 60000);
+
+  it("searches for audio content in video", async () => {
+    const result = await client.searchInVideo(TEST_VIDEO_URL, "elephants", "audio");
+
+    console.log(`Search result (audio):\n${JSON.stringify(result, null, 2)}`);
+
+    expect(result).toHaveProperty("matches");
+    expect(Array.isArray(result.matches)).toBe(true);
+
+    // The narrator mentions elephants
+    if (result.total_matches > 0) {
+      expect(result.matches[0]).toHaveProperty("timestamp_seconds");
+      expect(result.matches[0]).toHaveProperty("context");
+      expect(result.matches[0]).toHaveProperty("match_type");
+    }
+  }, 60000);
+
+  it("searches for content in both visual and audio", async () => {
+    const result = await client.searchInVideo(TEST_VIDEO_URL, "zoo", "both");
+
+    console.log(`Search result (both):\n${JSON.stringify(result, null, 2)}`);
+
+    expect(result).toHaveProperty("matches");
+    expect(result.query).toBe("zoo");
+    expect(result.total_matches).toBeGreaterThanOrEqual(0);
+  }, 60000);
+
+  it("returns empty matches for non-existent content", async () => {
+    const result = await client.searchInVideo(TEST_VIDEO_URL, "dinosaur spaceship laser", "both");
+
+    console.log(`Search result (no matches expected):\n${JSON.stringify(result, null, 2)}`);
+
+    expect(result).toHaveProperty("matches");
+    expect(Array.isArray(result.matches)).toBe(true);
+    // Should find no matches for this nonsense query
+    expect(result.total_matches).toBe(0);
+  }, 60000);
+
+  it("extracts transcript via AI", async () => {
+    const result = await client.extractTranscript(TEST_VIDEO_URL);
+
+    console.log(`AI Transcript response (${result.length} chars):\n${result.substring(0, 500)}...`);
+
+    expect(typeof result).toBe("string");
+    expect(result.length).toBeGreaterThan(10);
+
+    // Should be parseable JSON
+    const parsed = JSON.parse(result.replace(/^```(?:json)?\n?/, "").replace(/\n?```$/, ""));
+    expect(parsed).toHaveProperty("segments");
+    expect(Array.isArray(parsed.segments)).toBe(true);
+  }, 120000);
 });
 
 describe("GeminiVideoClient - Unit Tests", () => {

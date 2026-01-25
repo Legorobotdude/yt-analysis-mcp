@@ -15,12 +15,20 @@ import {
   ScreenshotExtractionError,
 } from "./screenshot-extractor.js";
 import {
+  TranscriptClient,
+  TranscriptExtractionError,
+} from "./transcript-client.js";
+import {
   SummarizeInputSchema,
   AskInputSchema,
   ExtractScreenshotsInputSchema,
   GetVideoTimestampsInputSchema,
   ExtractFramesInputSchema,
+  GetTranscriptInputSchema,
+  SearchInVideoInputSchema,
+  SearchYouTubeInputSchema,
   type DetailLevel,
+  type SearchType,
 } from "./validators.js";
 
 const server = new Server(
@@ -37,10 +45,12 @@ const server = new Server(
 
 let geminiClient: GeminiVideoClient;
 let youtubeClient: YouTubeMetadataClient | null = null;
+let transcriptClient: TranscriptClient;
 const screenshotExtractor = new ScreenshotExtractor();
 
 try {
   geminiClient = new GeminiVideoClient();
+  transcriptClient = new TranscriptClient(geminiClient);
 
   // Initialize YouTube client if API key is available
   // Can reuse GEMINI_API_KEY if YouTube Data API is enabled in same project
@@ -249,6 +259,121 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         return { content };
       }
 
+      case "get_transcript": {
+        const input = GetTranscriptInputSchema.parse(args);
+
+        // Fetch metadata and transcript in parallel
+        const [metadata, transcriptResult] = await Promise.all([
+          youtubeClient?.getMetadata(input.youtube_url).catch(() => null),
+          transcriptClient.getTranscript(input.youtube_url, {
+            includeTimestamps: input.include_timestamps,
+            format: input.format,
+            language: input.language,
+          }),
+        ]);
+
+        // Format response with metadata if available
+        let response = "";
+        if (metadata) {
+          response += `# ${metadata.title}\n`;
+          response += `**Channel:** ${metadata.channelTitle}\n`;
+          response += `**Source:** ${transcriptResult.source === "captions" ? "Native captions" : "AI transcription"} (${transcriptResult.language})\n\n`;
+          response += `---\n\n`;
+        } else {
+          response += `**Source:** ${transcriptResult.source === "captions" ? "Native captions" : "AI transcription"} (${transcriptResult.language})\n\n`;
+        }
+        response += transcriptResult.text;
+
+        return {
+          content: [{ type: "text", text: response }],
+        };
+      }
+
+      case "search_in_video": {
+        const input = SearchInVideoInputSchema.parse(args);
+
+        // Fetch metadata and search results in parallel
+        const [metadata, searchResult] = await Promise.all([
+          youtubeClient?.getMetadata(input.youtube_url).catch(() => null),
+          geminiClient.searchInVideo(
+            input.youtube_url,
+            input.query,
+            input.search_type as SearchType
+          ),
+        ]);
+
+        // Format response
+        let response = "";
+        if (metadata) {
+          response += `# ${metadata.title}\n`;
+          response += `**Channel:** ${metadata.channelTitle}\n\n`;
+          response += `---\n\n`;
+        }
+
+        response += `## Search Results for: "${searchResult.query}"\n\n`;
+
+        if (searchResult.total_matches === 0) {
+          response += `No matches found for "${searchResult.query}" in this video.`;
+        } else {
+          response += `Found ${searchResult.total_matches} match${searchResult.total_matches === 1 ? "" : "es"}:\n\n`;
+
+          for (const match of searchResult.matches) {
+            response += `### [${match.timestamp_formatted}] (${match.timestamp_seconds}s)\n`;
+            response += `**Type:** ${match.match_type}\n`;
+            response += `${match.context}\n\n`;
+          }
+        }
+
+        return {
+          content: [{ type: "text", text: response }],
+        };
+      }
+
+      case "search_youtube": {
+        if (!youtubeClient) {
+          throw new Error(
+            "YouTube search requires YOUTUBE_API_KEY or GEMINI_API_KEY environment variable"
+          );
+        }
+
+        const input = SearchYouTubeInputSchema.parse(args);
+        const results = await youtubeClient.search(input.query, input.max_results);
+
+        if (results.length === 0) {
+          return {
+            content: [
+              {
+                type: "text",
+                text: `No videos found for query: "${input.query}"`,
+              },
+            ],
+          };
+        }
+
+        let response = `## YouTube Search Results for: "${input.query}"\n\n`;
+        response += `Found ${results.length} video${results.length === 1 ? "" : "s"}:\n\n`;
+
+        for (let i = 0; i < results.length; i++) {
+          const result = results[i];
+          response += `### ${i + 1}. ${result.title}\n`;
+          response += `**Channel:** ${result.channelTitle}\n`;
+          response += `**Published:** ${new Date(result.publishedAt).toLocaleDateString()}\n`;
+          response += `**URL:** ${result.url}\n`;
+          if (result.description) {
+            const desc =
+              result.description.length > 200
+                ? result.description.slice(0, 200) + "..."
+                : result.description;
+            response += `\n${desc}\n`;
+          }
+          response += "\n";
+        }
+
+        return {
+          content: [{ type: "text", text: response }],
+        };
+      }
+
       default:
         throw new Error(`Unknown tool: ${name}`);
     }
@@ -264,6 +389,8 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       errorText = `Dependency error: ${message}`;
     } else if (error instanceof ScreenshotExtractionError) {
       errorText = `Screenshot extraction failed: ${message}`;
+    } else if (error instanceof TranscriptExtractionError) {
+      errorText = `Transcript extraction failed: ${message}`;
     } else if (error instanceof VideoAnalysisError) {
       errorText = message;
     } else {
