@@ -71,7 +71,7 @@ Required:
 - `GEMINI_API_KEY` - Google AI Studio API key
 
 Optional:
-- `GEMINI_MODEL` - Defaults to `gemini-3-flash-preview`
+- `GEMINI_MODEL` - Defaults to `gemini-flash-latest`
 
 ## Testing Notes
 

@@ -73,7 +73,7 @@ export class GeminiVideoClient {
     }
 
     this.client = new GoogleGenAI({ apiKey });
-    this.model = process.env.GEMINI_MODEL || "gemini-3-flash-preview";
+    this.model = process.env.GEMINI_MODEL || "gemini-flash-latest";
   }
 
   async summarize(youtubeUrl: string, detailLevel: DetailLevel): Promise<string> {
