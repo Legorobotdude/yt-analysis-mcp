@@ -1,12 +1,23 @@
 import { spawn } from "child_process";
 import { promisify } from "util";
-import { exec as execCallback } from "child_process";
+import { execFile as execFileCallback } from "child_process";
 import * as fs from "fs/promises";
 import * as path from "path";
 import * as os from "os";
 import { extractVideoId, type Resolution } from "./validators.js";
 
-const exec = promisify(execCallback);
+const execFile = promisify(execFileCallback);
+
+// Windows has no `which`; `where` is its equivalent and prints one path per line.
+async function resolveBinary(binary: string): Promise<string> {
+  const lookup = process.platform === "win32" ? "where" : "which";
+  const { stdout } = await execFile(lookup, [binary]);
+  const first = stdout.split(/\r?\n/).find((line) => line.trim().length > 0);
+  if (!first) {
+    throw new Error(`${binary} not found on PATH`);
+  }
+  return first.trim();
+}
 
 // Resolution to height mapping
 const RESOLUTION_MAP: Record<Resolution, number | null> = {
@@ -56,34 +67,31 @@ export class ScreenshotExtractor {
   async checkDependencies(): Promise<void> {
     // Check yt-dlp
     try {
-      const { stdout: ytdlpOut } = await exec("which yt-dlp");
-      this.ytdlpPath = ytdlpOut.trim();
+      this.ytdlpPath = await resolveBinary("yt-dlp");
     } catch {
       throw new DependencyError(
         "yt-dlp",
-        "Install via: brew install yt-dlp (macOS) or pip install yt-dlp"
+        "Install via: winget install yt-dlp.yt-dlp (Windows), brew install yt-dlp (macOS), or pip install yt-dlp"
       );
     }
 
     // Check ffmpeg
     try {
-      const { stdout: ffmpegOut } = await exec("which ffmpeg");
-      this.ffmpegPath = ffmpegOut.trim();
+      this.ffmpegPath = await resolveBinary("ffmpeg");
     } catch {
       throw new DependencyError(
         "ffmpeg",
-        "Install via: brew install ffmpeg (macOS) or apt install ffmpeg (Linux)"
+        "Install via: winget install Gyan.FFmpeg (Windows), brew install ffmpeg (macOS), or apt install ffmpeg (Linux)"
       );
     }
   }
 
-  async extractFrame(
+  // Ask yt-dlp for a direct stream URL. These are short-lived and rate limited,
+  // so callers extracting several frames should resolve once and reuse.
+  async resolveStreamUrl(
     youtubeUrl: string,
-    timestampSeconds: number,
-    outputPath: string,
-    quality: number = 85,
     resolution: Resolution = "large"
-  ): Promise<void> {
+  ): Promise<string> {
     if (!this.ytdlpPath || !this.ffmpegPath) {
       await this.checkDependencies();
     }
@@ -91,18 +99,33 @@ export class ScreenshotExtractor {
     // Get target height for yt-dlp format selection
     const targetHeight = RESOLUTION_MAP[resolution] ?? 1080;
 
-    // Get direct video stream URL from yt-dlp
-    const { stdout: streamUrl } = await exec(
-      `${this.ytdlpPath} -f "bestvideo[height<=${targetHeight}]/best[height<=${targetHeight}]" -g "${youtubeUrl}" 2>/dev/null | head -1`
-    );
+    // Invoked without a shell so the arguments survive quoting on every
+    // platform; yt-dlp can print more than one URL, so take the first.
+    const { stdout } = await execFile(this.ytdlpPath!, [
+      "-f",
+      `bestvideo[height<=${targetHeight}]/best[height<=${targetHeight}]`,
+      "-g",
+      youtubeUrl,
+    ]);
 
-    const videoStreamUrl = streamUrl.trim();
+    const videoStreamUrl =
+      stdout.split(/\r?\n/).find((line) => line.trim().length > 0)?.trim() ?? "";
     if (!videoStreamUrl) {
-      throw new ScreenshotExtractionError(
-        "Failed to get video stream URL",
-        timestampSeconds
-      );
+      throw new ScreenshotExtractionError("Failed to get video stream URL");
     }
+    return videoStreamUrl;
+  }
+
+  async extractFrame(
+    youtubeUrl: string,
+    timestampSeconds: number,
+    outputPath: string,
+    quality: number = 85,
+    resolution: Resolution = "large",
+    streamUrl?: string
+  ): Promise<void> {
+    const videoStreamUrl =
+      streamUrl ?? (await this.resolveStreamUrl(youtubeUrl, resolution));
 
     // Extract frame using ffmpeg with seeking
     // -ss before -i for fast seeking (input seeking)
@@ -188,12 +211,27 @@ export class ScreenshotExtractor {
     const screenshots: Screenshot[] = [];
     const errors: string[] = [];
 
+    // Resolve the stream URL once for the whole batch. Asking yt-dlp per frame
+    // gets throttled by googlevideo, which fails frames intermittently; a single
+    // URL seeks reliably and skips a yt-dlp round trip per timestamp.
+    let streamUrl = await this.resolveStreamUrl(youtubeUrl, resolution);
+
     for (const ts of timestamps) {
       const filename = `${videoId}_${ts.time_seconds}s.jpg`;
       const filePath = path.join(outputDir, filename);
 
       try {
-        await this.extractFrame(youtubeUrl, ts.time_seconds, filePath, quality, resolution);
+        try {
+          await this.extractFrame(
+            youtubeUrl, ts.time_seconds, filePath, quality, resolution, streamUrl
+          );
+        } catch {
+          // The URL can expire or get rejected part way through a long batch.
+          streamUrl = await this.resolveStreamUrl(youtubeUrl, resolution);
+          await this.extractFrame(
+            youtubeUrl, ts.time_seconds, filePath, quality, resolution, streamUrl
+          );
+        }
 
         // Read file and convert to base64
         const buffer = await fs.readFile(filePath);
