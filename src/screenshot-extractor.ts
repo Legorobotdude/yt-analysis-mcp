@@ -1,12 +1,110 @@
 import { spawn } from "child_process";
-import { promisify } from "util";
-import { exec as execCallback } from "child_process";
 import * as fs from "fs/promises";
 import * as path from "path";
 import * as os from "os";
 import { extractVideoId, type Resolution } from "./validators.js";
 
-const exec = promisify(execCallback);
+const PROCESS_TIMEOUT_MS = 120_000;
+const MAX_CAPTURE_CHARS = 64 * 1024;
+const MAX_DIAGNOSTIC_CHARS = 500;
+
+interface ProcessResult {
+  stdout: string;
+  stderr: string;
+}
+
+function appendPrefix(current: string, data: Buffer | string): string {
+  if (current.length >= MAX_CAPTURE_CHARS) return current;
+  return (current + data.toString()).slice(0, MAX_CAPTURE_CHARS);
+}
+
+function appendSuffix(current: string, data: Buffer | string): string {
+  return (current + data.toString()).slice(-MAX_CAPTURE_CHARS);
+}
+
+function sanitizedDiagnostic(value: string): string {
+  return value
+    .replace(/https?:\/\/[^\s"'<>]+/gi, "[redacted URL]")
+    .trim()
+    .slice(-MAX_DIAGNOSTIC_CHARS);
+}
+
+function processErrorMessage(
+  name: string,
+  detail: string,
+  diagnostic = ""
+): string {
+  const safeDiagnostic = sanitizedDiagnostic(diagnostic);
+  return `${name} ${detail}${safeDiagnostic ? `: ${safeDiagnostic}` : ""}`;
+}
+
+function runProcess(
+  command: string,
+  args: string[],
+  name: string
+): Promise<ProcessResult> {
+  return new Promise((resolve, reject) => {
+    let stdout = "";
+    let stderr = "";
+    let settled = false;
+
+    const finish = (callback: () => void) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timeout);
+      callback();
+    };
+
+    const proc = spawn(command, args, {
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+
+    proc.stdout.on("data", (data: Buffer | string) => {
+      stdout = appendPrefix(stdout, data);
+    });
+    proc.stderr.on("data", (data: Buffer | string) => {
+      stderr = appendSuffix(stderr, data);
+    });
+
+    const timeout = setTimeout(() => {
+      proc.kill();
+      finish(() => {
+        reject(
+          new Error(
+            processErrorMessage(
+              name,
+              `timed out after ${PROCESS_TIMEOUT_MS}ms`,
+              stderr
+            )
+          )
+        );
+      });
+    }, PROCESS_TIMEOUT_MS);
+
+    proc.on("error", (error) => {
+      finish(() => {
+        reject(
+          new Error(
+            processErrorMessage(name, "spawn error", error.message)
+          )
+        );
+      });
+    });
+
+    proc.on("close", (code, signal) => {
+      finish(() => {
+        if (code !== 0) {
+          const status = signal ? `signal ${signal}` : `code ${code}`;
+          reject(
+            new Error(processErrorMessage(name, `failed (${status})`, stderr))
+          );
+          return;
+        }
+        resolve({ stdout, stderr });
+      });
+    });
+  });
+}
 
 // Resolution to height mapping
 const RESOLUTION_MAP: Record<Resolution, number | null> = {
@@ -56,8 +154,8 @@ export class ScreenshotExtractor {
   async checkDependencies(): Promise<void> {
     // Check yt-dlp
     try {
-      const { stdout: ytdlpOut } = await exec("which yt-dlp");
-      this.ytdlpPath = ytdlpOut.trim();
+      await runProcess("yt-dlp", ["--version"], "yt-dlp");
+      this.ytdlpPath = "yt-dlp";
     } catch {
       throw new DependencyError(
         "yt-dlp",
@@ -67,8 +165,8 @@ export class ScreenshotExtractor {
 
     // Check ffmpeg
     try {
-      const { stdout: ffmpegOut } = await exec("which ffmpeg");
-      this.ffmpegPath = ffmpegOut.trim();
+      await runProcess("ffmpeg", ["-version"], "ffmpeg");
+      this.ffmpegPath = "ffmpeg";
     } catch {
       throw new DependencyError(
         "ffmpeg",
@@ -92,11 +190,28 @@ export class ScreenshotExtractor {
     const targetHeight = RESOLUTION_MAP[resolution] ?? 1080;
 
     // Get direct video stream URL from yt-dlp
-    const { stdout: streamUrl } = await exec(
-      `${this.ytdlpPath} -f "bestvideo[height<=${targetHeight}]/best[height<=${targetHeight}]" -g "${youtubeUrl}" 2>/dev/null | head -1`
-    );
+    let streamUrl: string;
+    try {
+      ({ stdout: streamUrl } = await runProcess(
+        this.ytdlpPath!,
+        [
+          "-f",
+          `bestvideo[height<=${targetHeight}]/best[height<=${targetHeight}]`,
+          "-g",
+          youtubeUrl,
+        ],
+        "yt-dlp"
+      ));
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "yt-dlp failed";
+      throw new ScreenshotExtractionError(message, timestampSeconds);
+    }
 
-    const videoStreamUrl = streamUrl.trim();
+    const videoStreamUrl =
+      streamUrl
+        .split(/\r?\n/)
+        .map((line) => line.trim())
+        .find((line) => line.length > 0) ?? "";
     if (!videoStreamUrl) {
       throw new ScreenshotExtractionError(
         "Failed to get video stream URL",
@@ -108,8 +223,7 @@ export class ScreenshotExtractor {
     // -ss before -i for fast seeking (input seeking)
     // Quality scale: 2-31 where lower = better
     const ffmpegQuality = Math.max(2, Math.min(31, Math.round((100 - quality) / 3.33)));
-    const ffmpegCmd = [
-      this.ffmpegPath!,
+    const ffmpegArgs = [
       "-ss",
       String(timestampSeconds),
       "-i",
@@ -123,43 +237,17 @@ export class ScreenshotExtractor {
     // Add scaling filter if resolution requires it
     const scaleHeight = RESOLUTION_MAP[resolution];
     if (scaleHeight !== null) {
-      ffmpegCmd.push("-vf", `scale=-1:${scaleHeight}`);
+      ffmpegArgs.push("-vf", `scale=-1:${scaleHeight}`);
     }
 
-    ffmpegCmd.push("-y", outputPath);
+    ffmpegArgs.push("-y", outputPath);
 
-    await new Promise<void>((resolve, reject) => {
-      const proc = spawn(ffmpegCmd[0], ffmpegCmd.slice(1), {
-        stdio: ["ignore", "pipe", "pipe"],
-      });
-
-      let stderr = "";
-      proc.stderr.on("data", (data) => {
-        stderr += data.toString();
-      });
-
-      proc.on("close", (code) => {
-        if (code !== 0) {
-          reject(
-            new ScreenshotExtractionError(
-              `ffmpeg failed (code ${code}): ${stderr.slice(-500)}`,
-              timestampSeconds
-            )
-          );
-        } else {
-          resolve();
-        }
-      });
-
-      proc.on("error", (err) => {
-        reject(
-          new ScreenshotExtractionError(
-            `ffmpeg spawn error: ${err.message}`,
-            timestampSeconds
-          )
-        );
-      });
-    });
+    try {
+      await runProcess(this.ffmpegPath!, ffmpegArgs, "ffmpeg");
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "ffmpeg failed";
+      throw new ScreenshotExtractionError(message, timestampSeconds);
+    }
   }
 
   async extractScreenshots(

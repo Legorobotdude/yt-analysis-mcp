@@ -28,6 +28,20 @@ describe("YouTubeUrlSchema", () => {
     expect(YouTubeUrlSchema.parse(url)).toBe(url);
   });
 
+  it.each([
+    [
+      "youtube.com/watch",
+      "https://www.youtube.com/watch?v=dQw4w9WgXcQ&t=60&feature=share",
+    ],
+    [
+      "youtube.com/shorts",
+      "https://youtube.com/shorts/dQw4w9WgXcQ?feature=share&t=60",
+    ],
+    ["youtu.be", "https://youtu.be/dQw4w9WgXcQ?t=60&feature=share"],
+  ])("accepts canonical %s URL with normal query parameters", (_kind, url) => {
+    expect(YouTubeUrlSchema.parse(url)).toBe(url);
+  });
+
   it("accepts http URLs", () => {
     const url = "http://youtube.com/watch?v=dQw4w9WgXcQ";
     expect(YouTubeUrlSchema.parse(url)).toBe(url);
@@ -64,6 +78,25 @@ describe("YouTubeUrlSchema", () => {
     expect(() =>
       YouTubeUrlSchema.parse("https://youtube.com/playlist?list=PLxxx")
     ).toThrow("Invalid YouTube URL");
+  });
+
+  it.each([
+    [
+      "semicolon suffix",
+      "https://youtube.com/watch?v=abc123;touch${IFS}/tmp/pwned",
+    ],
+    ["pipe suffix", "https://youtube.com/watch?v=abc123|id"],
+    ["command substitution", "https://youtube.com/watch?v=abc123$(id)"],
+    [
+      "credential/userinfo host trick",
+      "https://youtube.com@evil.example/watch?v=abc123",
+    ],
+    [
+      "non-YouTube host with a YouTube-looking path",
+      "https://evil.example/youtube.com/watch?v=abc123",
+    ],
+  ])("rejects %s", (_case, url) => {
+    expect(() => YouTubeUrlSchema.parse(url)).toThrow("Invalid YouTube URL");
   });
 });
 

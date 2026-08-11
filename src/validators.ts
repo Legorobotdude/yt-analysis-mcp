@@ -1,12 +1,56 @@
 import { z } from "zod";
 
-const YOUTUBE_URL_REGEX =
-  /^https?:\/\/(?:www\.)?(?:youtube\.com\/(?:watch\?v=|shorts\/)|youtu\.be\/)[\w-]+/;
+const YOUTUBE_HOSTS = new Set([
+  "youtube.com",
+  "www.youtube.com",
+  "youtu.be",
+]);
+const YOUTUBE_VIDEO_ID_REGEX = /^[A-Za-z0-9_-]+$/;
+
+function isValidYouTubeUrl(url: string): boolean {
+  try {
+    if (/[\u0000-\u001F\u007F]/.test(url)) return false;
+
+    const urlObj = new URL(url);
+    if (urlObj.protocol !== "http:" && urlObj.protocol !== "https:") {
+      return false;
+    }
+    if (urlObj.username || urlObj.password || urlObj.port) return false;
+    if (!YOUTUBE_HOSTS.has(urlObj.hostname)) return false;
+
+    // URL normalizes default ports away, so compare the original authority to
+    // the parsed hostname to reject every explicit port and userinfo form.
+    const schemeSeparator = url.indexOf("://");
+    if (schemeSeparator === -1) return false;
+    const authority = url
+      .slice(schemeSeparator + 3)
+      .split(/[/?#]/, 1)[0]
+      .toLowerCase();
+    if (authority !== urlObj.hostname) return false;
+
+    if (urlObj.hostname === "youtu.be") {
+      const match = urlObj.pathname.match(/^\/([A-Za-z0-9_-]+)$/);
+      return match !== null;
+    }
+
+    if (urlObj.pathname === "/watch") {
+      const videoId = urlObj.searchParams.get("v");
+      return videoId !== null && YOUTUBE_VIDEO_ID_REGEX.test(videoId);
+    }
+
+    const shortsMatch = urlObj.pathname.match(
+      /^\/shorts\/([A-Za-z0-9_-]+)$/
+    );
+    return shortsMatch !== null;
+  } catch {
+    return false;
+  }
+}
 
 export const YouTubeUrlSchema = z
   .string()
   .trim()
-  .refine((url) => YOUTUBE_URL_REGEX.test(url), {
+  .refine(isValidYouTubeUrl, {
     message:
       "Invalid YouTube URL. Expected format: youtube.com/watch?v=ID, youtu.be/ID, or youtube.com/shorts/ID",
   });
