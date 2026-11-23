@@ -49,6 +49,14 @@ export interface ExtractOptions {
   resolution?: Resolution;
 }
 
+// Retry configuration
+const MAX_RETRIES = 3;
+const RETRY_DELAY_MS = 2000;
+
+async function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
 export class ScreenshotExtractor {
   private ytdlpPath: string | null = null;
   private ffmpegPath: string | null = null;
@@ -77,35 +85,71 @@ export class ScreenshotExtractor {
     }
   }
 
-  async extractFrame(
+  /**
+   * Get the video stream URL from YouTube.
+   * Uses yt-dlp with cookies from browser for better access.
+   */
+  async getStreamUrl(
     youtubeUrl: string,
+    resolution: Resolution = "large"
+  ): Promise<string> {
+    if (!this.ytdlpPath) {
+      await this.checkDependencies();
+    }
+
+    const targetHeight = RESOLUTION_MAP[resolution] ?? 1080;
+
+    // Try with cookies first (better success rate), fall back to no cookies
+    const cookiesSources = ["--cookies-from-browser", "chrome", "--cookies-from-browser", "firefox", ""];
+    let lastError: Error | null = null;
+
+    for (let i = 0; i < cookiesSources.length; i += 2) {
+      const cookiesArg = cookiesSources[i] ? `${cookiesSources[i]} ${cookiesSources[i + 1]}` : "";
+
+      for (let retry = 0; retry < MAX_RETRIES; retry++) {
+        try {
+          const cmd = `${this.ytdlpPath} ${cookiesArg} -f "bestvideo[height<=${targetHeight}]/best[height<=${targetHeight}]/best" -g "${youtubeUrl}" 2>/dev/null | head -1`;
+          const { stdout } = await exec(cmd, { timeout: 30000 });
+          const streamUrl = stdout.trim();
+
+          if (streamUrl && streamUrl.startsWith("http")) {
+            return streamUrl;
+          }
+        } catch (error) {
+          lastError = error instanceof Error ? error : new Error(String(error));
+
+          // Only retry on transient errors
+          if (retry < MAX_RETRIES - 1) {
+            await sleep(RETRY_DELAY_MS * (retry + 1));
+          }
+        }
+      }
+
+      // If cookies failed, try next source or no cookies
+      if (cookiesSources[i]) {
+        continue;
+      }
+    }
+
+    throw new ScreenshotExtractionError(
+      `Failed to get video stream URL after ${MAX_RETRIES} retries: ${lastError?.message || "Unknown error"}`
+    );
+  }
+
+  /**
+   * Extract a single frame using a pre-fetched stream URL.
+   */
+  async extractFrameFromStream(
+    streamUrl: string,
     timestampSeconds: number,
     outputPath: string,
     quality: number = 85,
     resolution: Resolution = "large"
   ): Promise<void> {
-    if (!this.ytdlpPath || !this.ffmpegPath) {
+    if (!this.ffmpegPath) {
       await this.checkDependencies();
     }
 
-    // Get target height for yt-dlp format selection
-    const targetHeight = RESOLUTION_MAP[resolution] ?? 1080;
-
-    // Get direct video stream URL from yt-dlp
-    const { stdout: streamUrl } = await exec(
-      `${this.ytdlpPath} -f "bestvideo[height<=${targetHeight}]/best[height<=${targetHeight}]" -g "${youtubeUrl}" 2>/dev/null | head -1`
-    );
-
-    const videoStreamUrl = streamUrl.trim();
-    if (!videoStreamUrl) {
-      throw new ScreenshotExtractionError(
-        "Failed to get video stream URL",
-        timestampSeconds
-      );
-    }
-
-    // Extract frame using ffmpeg with seeking
-    // -ss before -i for fast seeking (input seeking)
     // Quality scale: 2-31 where lower = better
     const ffmpegQuality = Math.max(2, Math.min(31, Math.round((100 - quality) / 3.33)));
     const ffmpegCmd = [
@@ -113,7 +157,7 @@ export class ScreenshotExtractor {
       "-ss",
       String(timestampSeconds),
       "-i",
-      videoStreamUrl,
+      streamUrl,
       "-vframes",
       "1",
       "-q:v",
@@ -162,6 +206,21 @@ export class ScreenshotExtractor {
     });
   }
 
+  /**
+   * Legacy method for single frame extraction.
+   * Gets stream URL and extracts frame in one call.
+   */
+  async extractFrame(
+    youtubeUrl: string,
+    timestampSeconds: number,
+    outputPath: string,
+    quality: number = 85,
+    resolution: Resolution = "large"
+  ): Promise<void> {
+    const streamUrl = await this.getStreamUrl(youtubeUrl, resolution);
+    await this.extractFrameFromStream(streamUrl, timestampSeconds, outputPath, quality, resolution);
+  }
+
   async extractScreenshots(
     youtubeUrl: string,
     timestamps: Array<{
@@ -185,6 +244,16 @@ export class ScreenshotExtractor {
     // Ensure output directory exists
     await fs.mkdir(outputDir, { recursive: true });
 
+    // Get stream URL ONCE and reuse for all frames
+    // This avoids rate limiting from multiple yt-dlp calls
+    let streamUrl: string;
+    try {
+      streamUrl = await this.getStreamUrl(youtubeUrl, resolution);
+    } catch (error) {
+      const msg = error instanceof Error ? error.message : String(error);
+      throw new ScreenshotExtractionError(`Failed to get video stream: ${msg}`);
+    }
+
     const screenshots: Screenshot[] = [];
     const errors: string[] = [];
 
@@ -192,30 +261,51 @@ export class ScreenshotExtractor {
       const filename = `${videoId}_${ts.time_seconds}s.jpg`;
       const filePath = path.join(outputDir, filename);
 
-      try {
-        await this.extractFrame(youtubeUrl, ts.time_seconds, filePath, quality, resolution);
+      // Retry logic for individual frame extraction
+      let extracted = false;
+      for (let retry = 0; retry < MAX_RETRIES && !extracted; retry++) {
+        try {
+          await this.extractFrameFromStream(streamUrl, ts.time_seconds, filePath, quality, resolution);
 
-        // Read file and convert to base64
-        const buffer = await fs.readFile(filePath);
-        const base64 = buffer.toString("base64");
+          // Read file and convert to base64
+          const buffer = await fs.readFile(filePath);
+          const base64 = buffer.toString("base64");
 
-        screenshots.push({
-          timestamp_seconds: ts.time_seconds,
-          timestamp_formatted: ts.time_formatted,
-          description: ts.description,
-          base64,
-          mimeType: "image/jpeg",
-          filePath: userOutputDir ? filePath : undefined,
-        });
+          screenshots.push({
+            timestamp_seconds: ts.time_seconds,
+            timestamp_formatted: ts.time_formatted,
+            description: ts.description,
+            base64,
+            mimeType: "image/jpeg",
+            filePath: userOutputDir ? filePath : undefined,
+          });
 
-        // Clean up temp file if no user output_dir specified
-        if (!userOutputDir) {
-          await fs.unlink(filePath).catch(() => {});
+          // Clean up temp file if no user output_dir specified
+          if (!userOutputDir) {
+            await fs.unlink(filePath).catch(() => {});
+          }
+
+          extracted = true;
+        } catch (error) {
+          const msg = error instanceof Error ? error.message : String(error);
+
+          // If 403 error and we have retries left, get a fresh stream URL
+          if (msg.includes("403") && retry < MAX_RETRIES - 1) {
+            console.error(`Got 403 at ${ts.time_formatted}, refreshing stream URL (retry ${retry + 1}/${MAX_RETRIES})`);
+            await sleep(RETRY_DELAY_MS * (retry + 1));
+            try {
+              streamUrl = await this.getStreamUrl(youtubeUrl, resolution);
+            } catch {
+              // Ignore refresh errors, try with existing URL
+            }
+          } else if (retry < MAX_RETRIES - 1) {
+            console.error(`Failed at ${ts.time_formatted}, retrying (${retry + 1}/${MAX_RETRIES}): ${msg}`);
+            await sleep(RETRY_DELAY_MS);
+          } else {
+            errors.push(`Timestamp ${ts.time_formatted}: ${msg}`);
+            console.error(`Failed to extract frame at ${ts.time_formatted}:`, msg);
+          }
         }
-      } catch (error) {
-        const msg = error instanceof Error ? error.message : String(error);
-        errors.push(`Timestamp ${ts.time_formatted}: ${msg}`);
-        console.error(`Failed to extract frame at ${ts.time_formatted}:`, msg);
       }
     }
 
